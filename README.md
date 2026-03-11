@@ -6,6 +6,7 @@
 
 - 支持 `/v1/chat/completions` 端點
 - 支持串流與非串流回應
+- 支持 OpenAI `tools` / `tool_choice` 欄位轉發與回傳 `tool_calls`
 - 自動取得與刷新 Merlin Bearer token
 - 使用 `.env` 中的 `PROXY_API_KEY` 保護 proxy 入口
 - 自動處理 Merlin API 所需的 UUID 與格式轉換
@@ -74,6 +75,35 @@ curl http://localhost:8000/v1/chat/completions \
     "model": "claude-4.6-sonnet",
     "messages": [{"role": "user", "content": "你好！"}],
     "stream": true
+  }'
+```
+
+### Tool use 範例
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-123" \
+  -d '{
+    "model": "claude-4.6-sonnet",
+    "messages": [{"role": "user", "content": "台北現在幾點？"}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_current_time",
+          "description": "Get current time of a timezone",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "timezone": {"type": "string"}
+            },
+            "required": ["timezone"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
   }'
 ```
 

@@ -52,6 +52,8 @@ class OpenAIRequest(BaseModel):
     model: str
     messages: List[Message]
     stream: Optional[bool] = False
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
 
 
 class MerlinTokenManager:
@@ -190,6 +192,50 @@ def get_last_user_message(messages: List[Message]) -> str:
     raise HTTPException(status_code=400, detail="No user message content found")
 
 
+def extract_tool_calls(inner_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw_tool_calls = inner_data.get("toolCalls") or inner_data.get("tool_calls") or []
+    if not isinstance(raw_tool_calls, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for call in raw_tool_calls:
+        if not isinstance(call, dict):
+            continue
+
+        function_payload = call.get("function")
+        if not isinstance(function_payload, dict):
+            function_payload = {
+                "name": call.get("name", ""),
+                "arguments": call.get("arguments", "{}"),
+            }
+
+        function_name = function_payload.get("name")
+        function_arguments = function_payload.get("arguments")
+
+        if not isinstance(function_name, str) or not function_name:
+            continue
+
+        if isinstance(function_arguments, dict):
+            function_arguments = json.dumps(function_arguments)
+        elif function_arguments is None:
+            function_arguments = "{}"
+        elif not isinstance(function_arguments, str):
+            function_arguments = str(function_arguments)
+
+        normalized.append(
+            {
+                "id": call.get("id") or f"call_{uuid.uuid4().hex}",
+                "type": "function",
+                "function": {
+                    "name": function_name,
+                    "arguments": function_arguments,
+                },
+            }
+        )
+
+    return normalized
+
+
 def get_headers() -> Dict[str, str]:
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
     timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+08:00[Asia/Taipei]"
@@ -242,14 +288,21 @@ def merlin_stream_generator(merlin_payload: Dict[str, Any]):
                 reasoning = inner_data.get("reasoning", "")
                 content = inner_data.get("content", "")
                 delta_content = text or reasoning or content
+                tool_calls = extract_tool_calls(inner_data)
 
-                if delta_content:
+                if delta_content or tool_calls:
+                    delta_payload: Dict[str, Any] = {}
+                    if delta_content:
+                        delta_payload["content"] = delta_content
+                    if tool_calls:
+                        delta_payload["tool_calls"] = tool_calls
+
                     openai_chunk = {
                         "id": f"chatcmpl-{uuid.uuid4()}",
                         "object": "chat.completion.chunk",
                         "created": int(datetime.datetime.now().timestamp()),
                         "model": merlin_payload["model"],
-                        "choices": [{"index": 0, "delta": {"content": delta_content}, "finish_reason": None}],
+                        "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}],
                     }
                     yield f"data: {json.dumps(openai_chunk)}\n\n"
             except json.JSONDecodeError:
@@ -280,7 +333,11 @@ async def chat_completions(request: OpenAIRequest, authorization: Optional[str] 
             "merlinMagic": False,
             "noTask": True,
             "proFinderMode": False,
-            "mcpConfig": {"isEnabled": False},
+            "mcpConfig": {
+                "isEnabled": bool(request.tools),
+                "tools": request.tools or [],
+                "toolChoice": request.tool_choice,
+            },
             "isWebpageChat": False,
             "webAccess": False,
         },
@@ -298,6 +355,7 @@ async def chat_completions(request: OpenAIRequest, authorization: Optional[str] 
         raise HTTPException(status_code=res.status, detail=res.read().decode())
 
     full_content = ""
+    response_tool_calls: List[Dict[str, Any]] = []
     while True:
         line = res.readline()
         if not line:
@@ -316,16 +374,23 @@ async def chat_completions(request: OpenAIRequest, authorization: Optional[str] 
                 reasoning = inner_data.get("reasoning", "")
                 content = inner_data.get("content", "")
                 full_content += text or reasoning or content
+                response_tool_calls.extend(extract_tool_calls(inner_data))
             except json.JSONDecodeError:
                 continue
     conn.close()
+
+    response_message: Dict[str, Any] = {"role": "assistant", "content": full_content or None}
+    finish_reason = "stop"
+    if response_tool_calls:
+        response_message["tool_calls"] = response_tool_calls
+        finish_reason = "tool_calls"
 
     return {
         "id": f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion",
         "created": int(datetime.datetime.now().timestamp()),
         "model": request.model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": full_content}, "finish_reason": "stop"}],
+        "choices": [{"index": 0, "message": response_message, "finish_reason": finish_reason}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
