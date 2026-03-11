@@ -13,7 +13,7 @@
 - 若 `tool_choice` 為 `required` 或指定函式，但上游仍未產生有效工具呼叫，會回傳 `422`，避免上游誤判為成功純文字回覆
 - 可用 Docker Compose 啟動
 - 可用 `LOG_LEVEL=DEBUG` 檢查 Roo Code / OpenCode 實際送入的 payload
-- 可將 debug 訊息透過 `loguru` 同步寫入 `%LOCALAPPDATA%\\merlinai-proxy\\logs\\proxy.log`，也可關閉檔案寫入
+- 可將 debug 訊息透過 `loguru` 同步寫入專案內的 `logs/proxy.log`，也可關閉檔案寫入
 
 ## 安裝步驟
 
@@ -100,7 +100,7 @@ LOG_TO_FILE=false
 - Merlin 回來的 event 摘要
 - 最後回給客戶端的 OpenAI 格式 response
 
-這些內容除了印到 console，也會透過 `loguru` 寫入 `%LOCALAPPDATA%\\merlinai-proxy\\logs\\proxy.log`；超過約 1 MB 後會保留 3 份輪替檔。若 `LOG_LEVEL=INFO`，這些 debug payload 不會輸出；若 `LOG_LEVEL=DEBUG`，則會完整輸出。若 `LOG_TO_FILE=false`，則只輸出到 console。
+這些內容除了印到 console，也會透過 `loguru` 寫入專案內的 `logs/proxy.log`；超過約 1 MB 後會保留 3 份輪替檔。若 `LOG_LEVEL=INFO`，這些 debug payload 不會輸出；若 `LOG_LEVEL=DEBUG`，則會完整輸出。若 `LOG_TO_FILE=false`，則只輸出到 console。
 
 這樣就能直接看 Roo Code / OpenCode 是不是有送 `tools`，以及 Merlin 回來有沒有任何可映射成 `tool_calls` 的結構。
 

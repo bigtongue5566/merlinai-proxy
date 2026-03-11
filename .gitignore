@@ -18,4 +18,5 @@ wheels/
 .playwright-cli/
 ps_output.debug
 proxy-debug.log
+logs/
 *.log
