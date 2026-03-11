@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 httpx[http2]
+loguru
 pydantic
 python-dotenv
 uuid

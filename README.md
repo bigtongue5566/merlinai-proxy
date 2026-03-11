@@ -13,15 +13,15 @@
 - 若 `tool_choice` 為 `required` 或指定函式，但上游仍未產生有效工具呼叫，會回傳 `422`，避免上游誤判為成功純文字回覆
 - 可用 Docker Compose 啟動
 - 可用 `LOG_LEVEL=DEBUG` 檢查 Roo Code / OpenCode 實際送入的 payload
-- 可將 debug 訊息透過 Python 內建 `logging` 同步寫入實體 `.log` 檔，方便追查串流與工具呼叫問題
+- 可將 debug 訊息透過 `loguru` 同步寫入 `%LOCALAPPDATA%\\merlinai-proxy\\logs\\proxy.log`，也可關閉檔案寫入
 
 ## 安裝步驟
 
-1. 確保已安裝 Python 3.8+
+1. 確保已安裝 Python 3.12+
 2. 安裝依賴套件
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 3. 建立環境變數檔
@@ -35,7 +35,7 @@ copy .env.example .env
 ## 本機執行
 
 ```bash
-python main.py
+uv run python main.py
 ```
 
 伺服器將在 `http://0.0.0.0:8000` 啟動。
@@ -85,17 +85,10 @@ http://localhost:8000
 LOG_LEVEL=DEBUG
 ```
 
-如需指定 log 檔路徑，也可以設定：
+如果你只想輸出到 console、不想寫檔，也可以設定：
 
 ```text
-DEBUG_PROXY_LOG_PATH=proxy-debug.log
-```
-
-如需控制 log rotate，也可以設定：
-
-```text
-DEBUG_PROXY_LOG_MAX_BYTES=1048576
-DEBUG_PROXY_LOG_BACKUP_COUNT=3
+LOG_TO_FILE=false
 ```
 
 之後重新啟動 proxy。每次 `/v1/chat/completions` 都會輸出：
@@ -107,7 +100,7 @@ DEBUG_PROXY_LOG_BACKUP_COUNT=3
 - Merlin 回來的 event 摘要
 - 最後回給客戶端的 OpenAI 格式 response
 
-這些內容除了印到 console，也會透過 Python `logging` 寫入 `DEBUG_PROXY_LOG_PATH` 指定的檔案；超過 `DEBUG_PROXY_LOG_MAX_BYTES` 後會依 `DEBUG_PROXY_LOG_BACKUP_COUNT` 進行輪替。若 `LOG_LEVEL=INFO`，這些 debug payload 不會輸出；若 `LOG_LEVEL=DEBUG`，則會完整輸出。
+這些內容除了印到 console，也會透過 `loguru` 寫入 `%LOCALAPPDATA%\\merlinai-proxy\\logs\\proxy.log`；超過約 1 MB 後會保留 3 份輪替檔。若 `LOG_LEVEL=INFO`，這些 debug payload 不會輸出；若 `LOG_LEVEL=DEBUG`，則會完整輸出。若 `LOG_TO_FILE=false`，則只輸出到 console。
 
 這樣就能直接看 Roo Code / OpenCode 是不是有送 `tools`，以及 Merlin 回來有沒有任何可映射成 `tool_calls` 的結構。
 
@@ -134,9 +127,7 @@ curl http://localhost:8000/v1/chat/completions \
 - `MERLIN_VERSION`: 轉發時使用的 Merlin version header
 - `PROXY_API_KEY`: 你的 proxy 對外要求的 API key
 - `LOG_LEVEL`: logger 層級，預設 `INFO`；設成 `DEBUG` 會輸出 request/response debug logs
-- `DEBUG_PROXY_LOG_PATH`: debug log 檔案路徑，預設為 `proxy-debug.log`
-- `DEBUG_PROXY_LOG_MAX_BYTES`: 單一 debug log 檔案大小上限，預設 `1048576`
-- `DEBUG_PROXY_LOG_BACKUP_COUNT`: 保留的輪替檔案數量，預設 `3`
+- `LOG_TO_FILE`: 是否寫入檔案 log，預設 `true`
 
 ## 如何找到 `MERLIN_FIREBASE_API_KEY`
 
