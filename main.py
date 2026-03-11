@@ -36,7 +36,6 @@ PROJECT_DIR = Path(__file__).resolve().parent
 LOG_FILE_PATH = PROJECT_DIR / "logs" / "proxy.log"
 LOG_MAX_BYTES = 1_048_576
 LOG_BACKUP_COUNT = 3
-DEBUG_LOG_ENABLED = LOG_LEVEL_NAME in {"TRACE", "DEBUG"}
 TOKEN_REFRESH_BUFFER_SECONDS = 60
 
 
@@ -163,10 +162,18 @@ token_manager = MerlinTokenManager()
 
 def configure_logger() -> None:
     logger.remove()
+    console_format = (
+        "<green>[proxy]</green> "
+        "<cyan>{time:YYYY-MM-DD HH:mm:ss}</cyan> "
+        "<level>{level: <8}</level> "
+        "<level>{message}</level>"
+    )
+    file_format = "[proxy] {time:YYYY-MM-DDTHH:mm:ssZZ} {level} {message}"
     logger.add(
         sys.stderr,
         level=LOG_LEVEL_NAME,
-        format="[proxy] {time:YYYY-MM-DDTHH:mm:ssZZ} {level} {message}",
+        colorize=True,
+        format=console_format,
         backtrace=False,
         diagnose=False,
     )
@@ -176,7 +183,7 @@ def configure_logger() -> None:
         logger.add(
             LOG_FILE_PATH,
             level=LOG_LEVEL_NAME,
-            format="[proxy] {time:YYYY-MM-DDTHH:mm:ssZZ} {level} {message}",
+            format=file_format,
             rotation=LOG_MAX_BYTES,
             retention=LOG_BACKUP_COUNT,
             encoding="utf-8",
@@ -188,15 +195,12 @@ def configure_logger() -> None:
 configure_logger()
 
 
-def debug_log(label: str, payload: Any) -> None:
-    if not DEBUG_LOG_ENABLED:
-        return
-
-    try:
-        body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-    except TypeError:
-        body = str(payload)
-    logger.debug(f"{label}:\n{body}")
+def log_debug_payload(label: str, payload: Any) -> None:
+    logger.opt(lazy=True).debug(
+        "{label}:\n{body}",
+        label=lambda: label,
+        body=lambda: json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+    )
 
 
 def verify_proxy_api_key(authorization: Optional[str]) -> None:
@@ -475,7 +479,7 @@ def build_streamed_openai_response(request: OpenAIRequest, full_content: str, re
     choice = response_payload["choices"][0]
     finish_reason = choice["finish_reason"]
     message = choice["message"]
-    debug_log(
+    log_debug_payload(
         "streamed_openai_response_summary",
         {
             "response_id": response_id,
@@ -527,7 +531,7 @@ def merlin_stream_generator(merlin_payload: Dict[str, Any], request: OpenAIReque
 
     if res.status != 200:
         error_msg = res.read().decode("utf-8", errors="ignore")
-        debug_log("merlin_stream_error", {"status": res.status, "body": error_msg})
+        log_debug_payload("merlin_stream_error", {"status": res.status, "body": error_msg})
         yield f"data: {json.dumps({'error': {'message': f'Merlin Error: {res.status}', 'details': error_msg}})}\n\n"
         yield "data: [DONE]\n\n"
         conn.close()
@@ -564,7 +568,7 @@ def merlin_stream_generator(merlin_payload: Dict[str, Any], request: OpenAIReque
             continue
     conn.close()
 
-    debug_log(
+    log_debug_payload(
         "merlin_stream_summary",
         {
             "merlin_event_count": len(raw_events),
@@ -580,7 +584,7 @@ def merlin_stream_generator(merlin_payload: Dict[str, Any], request: OpenAIReque
 @app.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIRequest, authorization: Optional[str] = Header(default=None)):
     verify_proxy_api_key(authorization)
-    debug_log(
+    log_debug_payload(
         "incoming_chat_request",
         {
             "model": request.model,
@@ -619,7 +623,7 @@ async def chat_completions(request: OpenAIRequest, authorization: Optional[str] 
             "webAccess": False,
         },
     }
-    debug_log("outgoing_merlin_payload", merlin_payload)
+    log_debug_payload("outgoing_merlin_payload", merlin_payload)
 
     if request.stream:
         return StreamingResponse(merlin_stream_generator(merlin_payload, request), media_type="text/event-stream")
@@ -631,7 +635,7 @@ async def chat_completions(request: OpenAIRequest, authorization: Optional[str] 
 
     if res.status != 200:
         error_body = res.read().decode()
-        debug_log("merlin_non_stream_error", {"status": res.status, "body": error_body})
+        log_debug_payload("merlin_non_stream_error", {"status": res.status, "body": error_body})
         raise HTTPException(status_code=res.status, detail=error_body)
 
     full_content = ""
@@ -665,7 +669,7 @@ async def chat_completions(request: OpenAIRequest, authorization: Optional[str] 
     conn.close()
 
     response_payload = build_openai_response(request, full_content, response_tool_calls)
-    debug_log(
+    log_debug_payload(
         "outgoing_openai_response",
         {
             "response": response_payload,
