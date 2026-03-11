@@ -1,18 +1,18 @@
 import datetime
 import http.client
 import json
-import logging
 import os
 from pathlib import Path
+import sys
 import threading
 import urllib.parse
 import uuid
-from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
+from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 load_dotenv()
@@ -31,11 +31,12 @@ MERLIN_PASSWORD = os.getenv("MERLIN_PASSWORD")
 MERLIN_VERSION = os.getenv("MERLIN_VERSION", "iframe-merlin-7.5.19")
 PROXY_API_KEY = os.getenv("PROXY_API_KEY", "sk-123")
 LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
-DEBUG_PROXY_LOG_PATH = Path(os.getenv("DEBUG_PROXY_LOG_PATH", "proxy-debug.log"))
-if not DEBUG_PROXY_LOG_PATH.is_absolute():
-    DEBUG_PROXY_LOG_PATH = Path(__file__).resolve().parent / DEBUG_PROXY_LOG_PATH
-DEBUG_PROXY_LOG_MAX_BYTES = int(os.getenv("DEBUG_PROXY_LOG_MAX_BYTES", "1048576"))
-DEBUG_PROXY_LOG_BACKUP_COUNT = int(os.getenv("DEBUG_PROXY_LOG_BACKUP_COUNT", "3"))
+LOG_TO_FILE = os.getenv("LOG_TO_FILE", "true").lower() in {"1", "true", "yes", "on"}
+LOCAL_APPDATA_DIR = Path(os.getenv("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+LOG_FILE_PATH = LOCAL_APPDATA_DIR / "merlinai-proxy" / "logs" / "proxy.log"
+LOG_MAX_BYTES = 1_048_576
+LOG_BACKUP_COUNT = 3
+DEBUG_LOG_ENABLED = LOG_LEVEL_NAME in {"TRACE", "DEBUG"}
 TOKEN_REFRESH_BUFFER_SECONDS = 60
 
 
@@ -160,46 +161,42 @@ class MerlinTokenManager:
 token_manager = MerlinTokenManager()
 
 
-def build_debug_logger() -> logging.Logger:
-    logger = logging.getLogger("merlin_proxy")
-    logger.handlers.clear()
-    logger.propagate = False
-    log_level = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
-    logger.setLevel(log_level)
-
-    formatter = logging.Formatter("[proxy] %(asctime)s %(levelname)s %(message)s", "%Y-%m-%dT%H:%M:%S%z")
-
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(log_level)
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
-
-    DEBUG_PROXY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = RotatingFileHandler(
-        DEBUG_PROXY_LOG_PATH,
-        maxBytes=DEBUG_PROXY_LOG_MAX_BYTES,
-        backupCount=DEBUG_PROXY_LOG_BACKUP_COUNT,
-        encoding="utf-8",
+def configure_logger() -> None:
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level=LOG_LEVEL_NAME,
+        format="[proxy] {time:YYYY-MM-DDTHH:mm:ssZZ} {level} {message}",
+        backtrace=False,
+        diagnose=False,
     )
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
 
-    return logger
+    if LOG_TO_FILE:
+        LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            LOG_FILE_PATH,
+            level=LOG_LEVEL_NAME,
+            format="[proxy] {time:YYYY-MM-DDTHH:mm:ssZZ} {level} {message}",
+            rotation=LOG_MAX_BYTES,
+            retention=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+            backtrace=False,
+            diagnose=False,
+        )
 
 
-logger = build_debug_logger()
+configure_logger()
 
 
 def debug_log(label: str, payload: Any) -> None:
-    if not logger.isEnabledFor(logging.DEBUG):
+    if not DEBUG_LOG_ENABLED:
         return
 
     try:
         body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
     except TypeError:
         body = str(payload)
-    logger.debug("%s:\n%s", label, body)
+    logger.debug(f"{label}:\n{body}")
 
 
 def verify_proxy_api_key(authorization: Optional[str]) -> None:
