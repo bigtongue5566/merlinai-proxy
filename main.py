@@ -27,6 +27,7 @@ MERLIN_EMAIL = os.getenv("MERLIN_EMAIL")
 MERLIN_PASSWORD = os.getenv("MERLIN_PASSWORD")
 MERLIN_VERSION = os.getenv("MERLIN_VERSION", "iframe-merlin-7.5.19")
 PROXY_API_KEY = os.getenv("PROXY_API_KEY", "sk-123")
+DEBUG_PROXY_LOGS = os.getenv("DEBUG_PROXY_LOGS", "false").lower() in {"1", "true", "yes", "on"}
 TOKEN_REFRESH_BUFFER_SECONDS = 60
 
 
@@ -151,6 +152,17 @@ class MerlinTokenManager:
 token_manager = MerlinTokenManager()
 
 
+def debug_log(label: str, payload: Any) -> None:
+    if not DEBUG_PROXY_LOGS:
+        return
+
+    try:
+        body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    except TypeError:
+        body = str(payload)
+    print(f"[proxy-debug] {label}:\n{body}")
+
+
 def verify_proxy_api_key(authorization: Optional[str]) -> None:
     expected_header = f"Bearer {PROXY_API_KEY}"
     if authorization != expected_header:
@@ -192,6 +204,80 @@ def get_last_user_message(messages: List[Message]) -> str:
     raise HTTPException(status_code=400, detail="No user message content found")
 
 
+def normalize_tool_choice(tool_choice: Optional[Union[str, Dict[str, Any]]]) -> Optional[str]:
+    if isinstance(tool_choice, str):
+        return tool_choice
+
+    if isinstance(tool_choice, dict):
+        if tool_choice.get("type") == "function":
+            function_name = tool_choice.get("function", {}).get("name")
+            if isinstance(function_name, str) and function_name:
+                return f"function:{function_name}"
+
+        raw_type = tool_choice.get("type")
+        if isinstance(raw_type, str) and raw_type:
+            return raw_type
+
+    return None
+
+
+def should_force_tool_json(request: OpenAIRequest) -> bool:
+    return bool(request.tools)
+
+
+def build_conversation_transcript(messages: List[Message]) -> str:
+    transcript_parts: List[str] = []
+    for message in messages:
+        text = extract_message_text(message.content)
+        if text:
+            transcript_parts.append(f"{message.role.upper()}: {text}")
+    return "\n\n".join(transcript_parts)
+
+
+def build_tool_prompt(request: OpenAIRequest) -> str:
+    tool_choice = normalize_tool_choice(request.tool_choice) or "auto"
+    tools_json = json.dumps(request.tools or [], ensure_ascii=False, indent=2)
+    transcript = build_conversation_transcript(request.messages)
+
+    return (
+        "You are acting as an OpenAI-compatible assistant with tool calling.\n"
+        "Return JSON only, with no markdown and no extra text.\n"
+        f"tool_choice={tool_choice}\n\n"
+        "Conversation transcript:\n"
+        f"{transcript}\n\n"
+        "Available tools:\n"
+        f"{tools_json}\n\n"
+        "Valid output formats:\n"
+        '{"type":"tool_calls","tool_calls":[{"name":"tool_name","arguments":{}}]}\n'
+        '{"type":"message","content":"final answer"}\n'
+        "If tool_choice requires a function, you must return tool_calls for that function.\n"
+        "Arguments must always be a JSON object.\n"
+    )
+
+
+def try_parse_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
+    text = raw_text.strip()
+    if not text:
+        return None
+
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        parsed = json.loads(text[start : end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
 def extract_tool_calls(inner_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     raw_tool_calls = inner_data.get("toolCalls") or inner_data.get("tool_calls") or []
     if not isinstance(raw_tool_calls, list):
@@ -216,7 +302,7 @@ def extract_tool_calls(inner_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
 
         if isinstance(function_arguments, dict):
-            function_arguments = json.dumps(function_arguments)
+            function_arguments = json.dumps(function_arguments, ensure_ascii=False)
         elif function_arguments is None:
             function_arguments = "{}"
         elif not isinstance(function_arguments, str):
@@ -236,6 +322,103 @@ def extract_tool_calls(inner_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def extract_tool_calls_from_json_payload(payload: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+
+    raw_tool_calls = payload.get("tool_calls")
+    if not isinstance(raw_tool_calls, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for call in raw_tool_calls:
+        if not isinstance(call, dict):
+            continue
+
+        name = call.get("name")
+        arguments = call.get("arguments", {})
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        normalized.append(
+            {
+                "id": f"call_{uuid.uuid4().hex}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                },
+            }
+        )
+
+    return normalized
+
+
+def build_openai_response(request: OpenAIRequest, full_content: str, response_tool_calls: List[Dict[str, Any]]) -> Dict[str, Any]:
+    parsed_payload = try_parse_json_object(full_content) if should_force_tool_json(request) else None
+    json_tool_calls = extract_tool_calls_from_json_payload(parsed_payload)
+    all_tool_calls = response_tool_calls or json_tool_calls
+
+    response_message: Dict[str, Any] = {"role": "assistant", "content": full_content or None}
+    finish_reason = "stop"
+
+    if parsed_payload and parsed_payload.get("type") == "message" and isinstance(parsed_payload.get("content"), str):
+        response_message["content"] = parsed_payload["content"]
+
+    if all_tool_calls:
+        response_message["content"] = None
+        response_message["tool_calls"] = all_tool_calls
+        finish_reason = "tool_calls"
+
+    required_tool_call = normalize_tool_choice(request.tool_choice)
+    if finish_reason != "tool_calls" and required_tool_call in {"required"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Tool calling was required, but upstream did not return a valid tool call payload.",
+        )
+    if finish_reason != "tool_calls" and isinstance(required_tool_call, str) and required_tool_call.startswith("function:"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Specific tool call was required ({required_tool_call}), but upstream did not return a valid tool call payload.",
+        )
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4()}",
+        "object": "chat.completion",
+        "created": int(datetime.datetime.now().timestamp()),
+        "model": request.model,
+        "choices": [{"index": 0, "message": response_message, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+def build_streamed_openai_response(request: OpenAIRequest, full_content: str, response_tool_calls: List[Dict[str, Any]]):
+    response_payload = build_openai_response(request, full_content, response_tool_calls)
+    response_id = response_payload["id"]
+    created = response_payload["created"]
+    choice = response_payload["choices"][0]
+    finish_reason = choice["finish_reason"]
+    message = choice["message"]
+
+    yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created, 'model': request.model, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
+
+    if finish_reason == "tool_calls":
+        for index, tool_call in enumerate(message["tool_calls"]):
+            yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created, 'model': request.model, 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': index, 'id': tool_call['id'], 'type': 'function', 'function': {'name': tool_call['function']['name'], 'arguments': tool_call['function']['arguments']}}]}, 'finish_reason': None}]})}\n\n"
+        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created, 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    content = message.get("content") or ""
+    if content:
+        yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created, 'model': request.model, 'choices': [{'index': 0, 'delta': {'content': content}, 'finish_reason': None}]})}\n\n"
+
+    yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created, 'model': request.model, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 def get_headers() -> Dict[str, str]:
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
     timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+08:00[Asia/Taipei]"
@@ -251,7 +434,7 @@ def get_headers() -> Dict[str, str]:
     }
 
 
-def merlin_stream_generator(merlin_payload: Dict[str, Any]):
+def merlin_stream_generator(merlin_payload: Dict[str, Any], request: OpenAIRequest):
     conn = http.client.HTTPSConnection(MERLIN_API_URL)
     headers = get_headers()
 
@@ -261,59 +444,70 @@ def merlin_stream_generator(merlin_payload: Dict[str, Any]):
 
     if res.status != 200:
         error_msg = res.read().decode("utf-8", errors="ignore")
+        debug_log("merlin_stream_error", {"status": res.status, "body": error_msg})
         yield f"data: {json.dumps({'error': {'message': f'Merlin Error: {res.status}', 'details': error_msg}})}\n\n"
         yield "data: [DONE]\n\n"
         conn.close()
         return
 
+    full_content = ""
+    response_tool_calls: List[Dict[str, Any]] = []
+    raw_events: List[Dict[str, Any]] = []
     while True:
         line = res.readline()
         if not line:
             break
 
         line_str = line.decode("utf-8", errors="ignore").strip()
-        if line_str.startswith("data:"):
-            data_str = line_str[5:].strip()
-            if not data_str:
-                continue
+        if not line_str.startswith("data:"):
+            continue
 
-            if data_str == "[DONE]":
-                yield "data: [DONE]\n\n"
-                break
+        data_str = line_str[5:].strip()
+        if not data_str:
+            continue
+        if data_str == "[DONE]":
+            break
 
-            try:
-                m_data = json.loads(data_str)
-                inner_data = m_data.get("data", {})
-                text = inner_data.get("text", "")
-                reasoning = inner_data.get("reasoning", "")
-                content = inner_data.get("content", "")
-                delta_content = text or reasoning or content
-                tool_calls = extract_tool_calls(inner_data)
-
-                if delta_content or tool_calls:
-                    delta_payload: Dict[str, Any] = {}
-                    if delta_content:
-                        delta_payload["content"] = delta_content
-                    if tool_calls:
-                        delta_payload["tool_calls"] = tool_calls
-
-                    openai_chunk = {
-                        "id": f"chatcmpl-{uuid.uuid4()}",
-                        "object": "chat.completion.chunk",
-                        "created": int(datetime.datetime.now().timestamp()),
-                        "model": merlin_payload["model"],
-                        "choices": [{"index": 0, "delta": delta_payload, "finish_reason": None}],
-                    }
-                    yield f"data: {json.dumps(openai_chunk)}\n\n"
-            except json.JSONDecodeError:
-                continue
+        try:
+            m_data = json.loads(data_str)
+            raw_events.append(m_data)
+            inner_data = m_data.get("data", {})
+            text = inner_data.get("text", "")
+            reasoning = inner_data.get("reasoning", "")
+            content = inner_data.get("content", "")
+            full_content += text or reasoning or content
+            response_tool_calls.extend(extract_tool_calls(inner_data))
+        except json.JSONDecodeError:
+            continue
     conn.close()
+
+    debug_log(
+        "merlin_stream_summary",
+        {
+            "merlin_event_count": len(raw_events),
+            "merlin_event_sample": raw_events[:3],
+            "assembled_content": full_content,
+            "tool_call_count": len(response_tool_calls),
+        },
+    )
+
+    yield from build_streamed_openai_response(request, full_content, response_tool_calls)
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIRequest, authorization: Optional[str] = Header(default=None)):
     verify_proxy_api_key(authorization)
-    user_msg = get_last_user_message(request.messages)
+    debug_log(
+        "incoming_chat_request",
+        {
+            "model": request.model,
+            "stream": request.stream,
+            "has_tools": bool(request.tools),
+            "tool_choice": request.tool_choice,
+            "message_count": len(request.messages),
+        },
+    )
+    user_msg = build_tool_prompt(request) if should_force_tool_json(request) else get_last_user_message(request.messages)
 
     merlin_payload = {
         "attachments": [],
@@ -342,9 +536,10 @@ async def chat_completions(request: OpenAIRequest, authorization: Optional[str] 
             "webAccess": False,
         },
     }
+    debug_log("outgoing_merlin_payload", merlin_payload)
 
     if request.stream:
-        return StreamingResponse(merlin_stream_generator(merlin_payload), media_type="text/event-stream")
+        return StreamingResponse(merlin_stream_generator(merlin_payload, request), media_type="text/event-stream")
 
     conn = http.client.HTTPSConnection(MERLIN_API_URL)
     headers = get_headers()
@@ -352,47 +547,50 @@ async def chat_completions(request: OpenAIRequest, authorization: Optional[str] 
     res = conn.getresponse()
 
     if res.status != 200:
-        raise HTTPException(status_code=res.status, detail=res.read().decode())
+        error_body = res.read().decode()
+        debug_log("merlin_non_stream_error", {"status": res.status, "body": error_body})
+        raise HTTPException(status_code=res.status, detail=error_body)
 
     full_content = ""
     response_tool_calls: List[Dict[str, Any]] = []
+    raw_events: List[Dict[str, Any]] = []
     while True:
         line = res.readline()
         if not line:
             break
         line_str = line.decode("utf-8", errors="ignore").strip()
-        if line_str.startswith("data:"):
-            data_str = line_str[5:].strip()
-            if data_str == "[DONE]":
-                break
-            if not data_str:
-                continue
-            try:
-                m_data = json.loads(data_str)
-                inner_data = m_data.get("data", {})
-                text = inner_data.get("text", "")
-                reasoning = inner_data.get("reasoning", "")
-                content = inner_data.get("content", "")
-                full_content += text or reasoning or content
-                response_tool_calls.extend(extract_tool_calls(inner_data))
-            except json.JSONDecodeError:
-                continue
+        if not line_str.startswith("data:"):
+            continue
+
+        data_str = line_str[5:].strip()
+        if data_str == "[DONE]":
+            break
+        if not data_str:
+            continue
+
+        try:
+            m_data = json.loads(data_str)
+            raw_events.append(m_data)
+            inner_data = m_data.get("data", {})
+            text = inner_data.get("text", "")
+            reasoning = inner_data.get("reasoning", "")
+            content = inner_data.get("content", "")
+            full_content += text or reasoning or content
+            response_tool_calls.extend(extract_tool_calls(inner_data))
+        except json.JSONDecodeError:
+            continue
     conn.close()
 
-    response_message: Dict[str, Any] = {"role": "assistant", "content": full_content or None}
-    finish_reason = "stop"
-    if response_tool_calls:
-        response_message["tool_calls"] = response_tool_calls
-        finish_reason = "tool_calls"
-
-    return {
-        "id": f"chatcmpl-{uuid.uuid4()}",
-        "object": "chat.completion",
-        "created": int(datetime.datetime.now().timestamp()),
-        "model": request.model,
-        "choices": [{"index": 0, "message": response_message, "finish_reason": finish_reason}],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-    }
+    response_payload = build_openai_response(request, full_content, response_tool_calls)
+    debug_log(
+        "outgoing_openai_response",
+        {
+            "response": response_payload,
+            "merlin_event_count": len(raw_events),
+            "merlin_event_sample": raw_events[:3],
+        },
+    )
+    return response_payload
 
 
 @app.get("/v1/models")

@@ -6,11 +6,13 @@
 
 - 支持 `/v1/chat/completions` 端點
 - 支持串流與非串流回應
-- 支持 OpenAI `tools` / `tool_choice` 欄位轉發與回傳 `tool_calls`
 - 自動取得與刷新 Merlin Bearer token
 - 使用 `.env` 中的 `PROXY_API_KEY` 保護 proxy 入口
 - 自動處理 Merlin API 所需的 UUID 與格式轉換
+- 當請求帶有 `tools` 時，額外啟用 tool-calling 相容層，將 Merlin 輸出轉成 OpenAI `tool_calls`
+- 若 `tool_choice` 為 `required` 或指定函式，但上游仍未產生有效工具呼叫，會回傳 `422`，避免上游誤判為成功純文字回覆
 - 可用 Docker Compose 啟動
+- 可用 `DEBUG_PROXY_LOGS=true` 檢查 Roo Code / OpenCode 實際送入的 payload
 
 ## 安裝步驟
 
@@ -63,6 +65,36 @@ docker compose down
 http://localhost:8000
 ```
 
+## Tool calling 相容說明
+
+當 client 傳入 OpenAI `tools` / `tool_choice` 時，proxy 會：
+
+1. 保留 `mcpConfig.tools` 與 `mcpConfig.toolChoice` 給 Merlin
+2. 同時把對話與工具定義包成嚴格 JSON 輸出指令，降低 Merlin 只回自然語言的機率
+3. 若回來內容可解析為 `{"type":"tool_calls"...}`，proxy 會轉成 OpenAI `message.tool_calls`
+4. 若 `tool_choice` 是 `required` 或指定函式，但仍解析不到工具呼叫，proxy 直接回 `422`
+
+這樣上游就不會再收到「明明要求必需工具呼叫，卻被當成一般文字成功回覆」的假成功結果。
+
+## Debug Roo Code / OpenCode payload
+
+如果你要分析 tool calling，先把 `.env` 裡這個值打開：
+
+```text
+DEBUG_PROXY_LOGS=true
+```
+
+之後重新啟動 proxy。每次 `/v1/chat/completions` 都會輸出：
+
+- 原始 request body
+- 是否帶了 `tools`
+- `tool_choice`
+- 轉發給 Merlin 的 payload
+- Merlin 回來的 event 摘要
+- 最後回給客戶端的 OpenAI 格式 response
+
+這樣就能直接看 Roo Code / OpenCode 是不是有送 `tools`，以及 Merlin 回來有沒有任何可映射成 `tool_calls` 的結構。
+
 ## 使用範例
 
 呼叫 proxy 時要帶你自己的 proxy API key：
@@ -78,35 +110,6 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-### Tool use 範例
-
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-123" \
-  -d '{
-    "model": "claude-4.6-sonnet",
-    "messages": [{"role": "user", "content": "台北現在幾點？"}],
-    "tools": [
-      {
-        "type": "function",
-        "function": {
-          "name": "get_current_time",
-          "description": "Get current time of a timezone",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "timezone": {"type": "string"}
-            },
-            "required": ["timezone"]
-          }
-        }
-      }
-    ],
-    "tool_choice": "auto"
-  }'
-```
-
 ## 環境變數
 
 - `MERLIN_EMAIL`: Merlin 登入信箱
@@ -114,6 +117,7 @@ curl http://localhost:8000/v1/chat/completions \
 - `MERLIN_FIREBASE_API_KEY`: Firebase Web API key
 - `MERLIN_VERSION`: 轉發時使用的 Merlin version header
 - `PROXY_API_KEY`: 你的 proxy 對外要求的 API key
+- `DEBUG_PROXY_LOGS`: 是否輸出 request/response debug logs
 
 ## 如何找到 `MERLIN_FIREBASE_API_KEY`
 
@@ -127,31 +131,3 @@ curl http://localhost:8000/v1/chat/completions \
 ```text
 https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=...
 ```
-
-5. URL 裡 `key=` 後面的值就是 `MERLIN_FIREBASE_API_KEY`
-
-例如：
-
-```text
-https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=AIzaSyAvCgtQ4XbmlQGIynDT-v_M8eLaXrKmtiM
-```
-
-這裡的：
-
-```text
-AIzaSyAvCgtQ4XbmlQGIynDT-v_M8eLaXrKmtiM
-```
-
-就是要填進 `.env` 的 `MERLIN_FIREBASE_API_KEY`。
-
-補充：
-
-- 這個值通常是 Merlin 前端所屬 Firebase 專案的 Web API key
-- 它通常比帳號密碼穩定很多，但 Merlin 若改 Firebase 專案或更換前端設定，這個值仍可能改變
-- 如果登入突然失效，可以先重新抓一次這個 key
-
-## 注意事項
-
-- `.env` 已加入 `.gitignore`，避免把帳密提交進版本庫
-- `model` 參數會直接傳給 Merlin，請使用 Merlin 支持的模型名稱
-- 若 Merlin 改變串流格式，可能需要調整 `merlin_stream_generator` 的解析邏輯
