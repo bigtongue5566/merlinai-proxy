@@ -17,3 +17,5 @@ wheels/
 # Local debug artifacts
 .playwright-cli/
 ps_output.debug
+proxy-debug.log
+*.log

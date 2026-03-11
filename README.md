@@ -13,6 +13,7 @@
 - 若 `tool_choice` 為 `required` 或指定函式，但上游仍未產生有效工具呼叫，會回傳 `422`，避免上游誤判為成功純文字回覆
 - 可用 Docker Compose 啟動
 - 可用 `DEBUG_PROXY_LOGS=true` 檢查 Roo Code / OpenCode 實際送入的 payload
+- 可將 debug 訊息同步寫入實體 `.log` 檔，方便追查串流與工具呼叫問題
 
 ## 安裝步驟
 
@@ -84,6 +85,12 @@ http://localhost:8000
 DEBUG_PROXY_LOGS=true
 ```
 
+如需指定 log 檔路徑，也可以設定：
+
+```text
+DEBUG_PROXY_LOG_PATH=proxy-debug.log
+```
+
 之後重新啟動 proxy。每次 `/v1/chat/completions` 都會輸出：
 
 - 原始 request body
@@ -92,6 +99,8 @@ DEBUG_PROXY_LOGS=true
 - 轉發給 Merlin 的 payload
 - Merlin 回來的 event 摘要
 - 最後回給客戶端的 OpenAI 格式 response
+
+這些內容除了印到 console，也會追加寫入 `DEBUG_PROXY_LOG_PATH` 指定的檔案。
 
 這樣就能直接看 Roo Code / OpenCode 是不是有送 `tools`，以及 Merlin 回來有沒有任何可映射成 `tool_calls` 的結構。
 
@@ -118,6 +127,7 @@ curl http://localhost:8000/v1/chat/completions \
 - `MERLIN_VERSION`: 轉發時使用的 Merlin version header
 - `PROXY_API_KEY`: 你的 proxy 對外要求的 API key
 - `DEBUG_PROXY_LOGS`: 是否輸出 request/response debug logs
+- `DEBUG_PROXY_LOG_PATH`: debug log 檔案路徑，預設為 `proxy-debug.log`
 
 ## 如何找到 `MERLIN_FIREBASE_API_KEY`
 

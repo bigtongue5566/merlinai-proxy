@@ -2,6 +2,7 @@ import datetime
 import http.client
 import json
 import os
+from pathlib import Path
 import threading
 import urllib.parse
 import uuid
@@ -28,6 +29,9 @@ MERLIN_PASSWORD = os.getenv("MERLIN_PASSWORD")
 MERLIN_VERSION = os.getenv("MERLIN_VERSION", "iframe-merlin-7.5.19")
 PROXY_API_KEY = os.getenv("PROXY_API_KEY", "sk-123")
 DEBUG_PROXY_LOGS = os.getenv("DEBUG_PROXY_LOGS", "false").lower() in {"1", "true", "yes", "on"}
+DEBUG_PROXY_LOG_PATH = Path(os.getenv("DEBUG_PROXY_LOG_PATH", "proxy-debug.log"))
+if not DEBUG_PROXY_LOG_PATH.is_absolute():
+    DEBUG_PROXY_LOG_PATH = Path(__file__).resolve().parent / DEBUG_PROXY_LOG_PATH
 TOKEN_REFRESH_BUFFER_SECONDS = 60
 
 
@@ -160,7 +164,16 @@ def debug_log(label: str, payload: Any) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
     except TypeError:
         body = str(payload)
-    print(f"[proxy-debug] {label}:\n{body}")
+    timestamp = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+    log_entry = f"[proxy-debug] {timestamp} {label}:\n{body}\n"
+    print(log_entry, end="")
+
+    try:
+        DEBUG_PROXY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with DEBUG_PROXY_LOG_PATH.open("a", encoding="utf-8") as log_file:
+            log_file.write(log_entry)
+    except OSError as exc:
+        print(f"[proxy-debug] failed_to_write_log_file: {exc}")
 
 
 def verify_proxy_api_key(authorization: Optional[str]) -> None:
@@ -241,7 +254,7 @@ def build_tool_prompt(request: OpenAIRequest) -> str:
 
     return (
         "You are acting as an OpenAI-compatible assistant with tool calling.\n"
-        "Return JSON only, with no markdown and no extra text.\n"
+        "Return exactly one JSON object only, with no markdown, no commentary, and no reasoning text.\n"
         f"tool_choice={tool_choice}\n\n"
         "Conversation transcript:\n"
         f"{transcript}\n\n"
@@ -252,7 +265,46 @@ def build_tool_prompt(request: OpenAIRequest) -> str:
         '{"type":"message","content":"final answer"}\n'
         "If tool_choice requires a function, you must return tool_calls for that function.\n"
         "Arguments must always be a JSON object.\n"
+        "Do not include any text before or after the JSON object.\n"
     )
+
+
+def extract_last_json_object(raw_text: str) -> Optional[str]:
+    in_string = False
+    escape = False
+    depth = 0
+    start_index: Optional[int] = None
+    completed_objects: List[str] = []
+
+    for index, char in enumerate(raw_text):
+        if escape:
+            escape = False
+            continue
+
+        if char == "\\" and in_string:
+            escape = True
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            if depth == 0:
+                start_index = index
+            depth += 1
+            continue
+
+        if char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start_index is not None:
+                completed_objects.append(raw_text[start_index : index + 1])
+                start_index = None
+
+    return completed_objects[-1] if completed_objects else None
 
 
 def try_parse_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
@@ -266,13 +318,12 @@ def try_parse_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
     except json.JSONDecodeError:
         pass
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    last_json_object = extract_last_json_object(text)
+    if not last_json_object:
         return None
 
     try:
-        parsed = json.loads(text[start : end + 1])
+        parsed = json.loads(last_json_object)
         return parsed if isinstance(parsed, dict) else None
     except json.JSONDecodeError:
         return None
@@ -401,6 +452,15 @@ def build_streamed_openai_response(request: OpenAIRequest, full_content: str, re
     choice = response_payload["choices"][0]
     finish_reason = choice["finish_reason"]
     message = choice["message"]
+    debug_log(
+        "streamed_openai_response_summary",
+        {
+            "response_id": response_id,
+            "finish_reason": finish_reason,
+            "tool_call_names": [tool_call["function"]["name"] for tool_call in message.get("tool_calls", [])],
+            "content_preview": (message.get("content") or "")[:300],
+        },
+    )
 
     yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created, 'model': request.model, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
 
