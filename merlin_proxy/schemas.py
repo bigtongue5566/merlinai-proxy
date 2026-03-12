@@ -16,6 +16,9 @@ class Message(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     role: str
+    name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
     content: Optional[Union[str, List[Union[ContentPart, Dict[str, Any], str]]]] = None
 
 

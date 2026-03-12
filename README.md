@@ -106,6 +106,8 @@ LOG_TO_FILE=false
 
 ## 使用範例
 
+可用模型目前包含：`gpt-5.4`、`grok-4.1-fast`、`gemini-3.1-flash-lite`、`gemini-3.1-pro`、`claude-4.6-sonnet`、`claude-4.6-opus`、`glm-5`、`minimax-m2.5`。
+
 呼叫 proxy 時要帶你自己的 proxy API key：
 
 ```bash

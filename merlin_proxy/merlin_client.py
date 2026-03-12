@@ -2,14 +2,14 @@ import datetime
 import http.client
 import json
 import uuid
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import HTTPException
 
 from .auth import token_manager
 from .config import MERLIN_API_URL, MERLIN_PATH, MERLIN_VERSION
 from .logging_config import log_debug_payload
-from .openai_adapter import build_streamed_openai_response, extract_tool_calls
+from .openai_adapter import build_streamed_openai_response, compact_tools_for_prompt, extract_tool_calls, get_allowed_tool_names
 from .schemas import OpenAIRequest
 
 
@@ -29,6 +29,7 @@ def get_headers() -> Dict[str, str]:
 
 
 def build_merlin_payload(request: OpenAIRequest, user_message: str) -> Dict[str, Any]:
+    compact_tools = compact_tools_for_prompt(request.tools)
     return {
         "attachments": [],
         "chatId": str(uuid.uuid4()),
@@ -49,7 +50,7 @@ def build_merlin_payload(request: OpenAIRequest, user_message: str) -> Dict[str,
             "proFinderMode": False,
             "mcpConfig": {
                 "isEnabled": bool(request.tools),
-                "tools": request.tools or [],
+                "tools": compact_tools,
                 "toolChoice": request.tool_choice,
             },
             "isWebpageChat": False,
@@ -83,9 +84,8 @@ def _read_merlin_event_stream(res: http.client.HTTPResponse) -> tuple[str, List[
             raw_events.append(merlin_data)
             inner_data = merlin_data.get("data", {})
             text = inner_data.get("text", "")
-            reasoning = inner_data.get("reasoning", "")
             content = inner_data.get("content", "")
-            full_content += text or reasoning or content
+            full_content += text or content
             response_tool_calls.extend(extract_tool_calls(inner_data))
         except json.JSONDecodeError:
             continue
@@ -106,7 +106,7 @@ def merlin_stream_generator(merlin_payload: Dict[str, Any], request: OpenAIReque
             yield "data: [DONE]\n\n"
             return
 
-        full_content, response_tool_calls, raw_events = _read_merlin_event_stream(res)
+        full_content, response_tool_calls, raw_events = _read_merlin_event_stream_with_allowed_tools(res, request)
         log_debug_payload(
             "merlin_stream_summary",
             {
@@ -116,12 +116,20 @@ def merlin_stream_generator(merlin_payload: Dict[str, Any], request: OpenAIReque
                 "tool_call_count": len(response_tool_calls),
             },
         )
-        yield from build_streamed_openai_response(request, full_content, response_tool_calls)
+        try:
+            yield from build_streamed_openai_response(request, full_content, response_tool_calls)
+        except HTTPException as exc:
+            error_detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, ensure_ascii=False)
+            log_debug_payload("streamed_openai_response_error", {"status": exc.status_code, "detail": error_detail})
+            yield f"data: {json.dumps({'error': {'message': error_detail, 'type': 'invalid_response_error', 'code': exc.status_code}})}\n\n"
+            yield "data: [DONE]\n\n"
     finally:
         conn.close()
 
 
-def send_merlin_request(merlin_payload: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+def send_merlin_request(
+    merlin_payload: Dict[str, Any], request: Optional[OpenAIRequest] = None
+) -> tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
     conn = http.client.HTTPSConnection(MERLIN_API_URL)
     try:
         conn.request("POST", MERLIN_PATH, json.dumps(merlin_payload), get_headers())
@@ -132,6 +140,45 @@ def send_merlin_request(merlin_payload: Dict[str, Any]) -> tuple[str, List[Dict[
             log_debug_payload("merlin_non_stream_error", {"status": res.status, "body": error_body})
             raise HTTPException(status_code=res.status, detail=error_body)
 
-        return _read_merlin_event_stream(res)
+        if request is None:
+            return _read_merlin_event_stream(res)
+        return _read_merlin_event_stream_with_allowed_tools(res, request)
     finally:
         conn.close()
+
+
+def _read_merlin_event_stream_with_allowed_tools(
+    res: http.client.HTTPResponse, request: OpenAIRequest
+) -> tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    full_content = ""
+    response_tool_calls: List[Dict[str, Any]] = []
+    raw_events: List[Dict[str, Any]] = []
+    allowed_tool_names = get_allowed_tool_names(request)
+
+    while True:
+        line = res.readline()
+        if not line:
+            break
+
+        line_str = line.decode("utf-8", errors="ignore").strip()
+        if not line_str.startswith("data:"):
+            continue
+
+        data_str = line_str[5:].strip()
+        if not data_str:
+            continue
+        if data_str == "[DONE]":
+            break
+
+        try:
+            merlin_data = json.loads(data_str)
+            raw_events.append(merlin_data)
+            inner_data = merlin_data.get("data", {})
+            text = inner_data.get("text", "")
+            content = inner_data.get("content", "")
+            full_content += text or content
+            response_tool_calls.extend(extract_tool_calls(inner_data, allowed_tool_names))
+        except json.JSONDecodeError:
+            continue
+
+    return full_content, response_tool_calls, raw_events
