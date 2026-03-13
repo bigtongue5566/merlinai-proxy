@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 httpx[http2]
+json-repair
 loguru
 pydantic
 python-dotenv

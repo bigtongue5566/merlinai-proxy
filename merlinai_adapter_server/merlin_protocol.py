@@ -5,6 +5,7 @@ import uuid
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
 
 from fastapi import HTTPException
+from json_repair import repair_json
 from pydantic import BaseModel
 
 from .config import TOOL_DESCRIPTION_MAX_CHARS, TOOL_MESSAGE_MAX_CHARS, TOOL_PROMPT_MAX_MESSAGES
@@ -141,6 +142,30 @@ def build_conversation_transcript(messages: List[Message]) -> str:
         if text:
             transcript_parts.append(f"{message.role.upper()}: {_trim_text(text, TOOL_MESSAGE_MAX_CHARS)}")
     return "\n\n".join(transcript_parts)
+
+
+def _build_history_and_current_query(messages: List[Message]) -> Tuple[str, str]:
+    selected_messages = _select_tool_prompt_messages(messages)
+    last_user_index: Optional[int] = None
+    current_user_query = ""
+
+    for index in range(len(selected_messages) - 1, -1, -1):
+        message = selected_messages[index]
+        if message.role != "user":
+            continue
+        text = extract_message_text(message.content)
+        if not text:
+            continue
+        last_user_index = index
+        current_user_query = _trim_text(text, TOOL_MESSAGE_MAX_CHARS)
+        break
+
+    if last_user_index is None:
+        return build_conversation_transcript(messages), _trim_text(get_last_user_message(messages), TOOL_MESSAGE_MAX_CHARS)
+
+    history_messages = selected_messages[:last_user_index]
+    history = build_conversation_transcript(history_messages)
+    return history, current_user_query
 
 
 # Tool schemas are compacted before sending them upstream to keep prompts short.
@@ -352,7 +377,10 @@ def try_parse_structured_payloads(raw_text: str) -> List[Dict[str, Any]]:
         try:
             parsed = json.loads(block)
         except json.JSONDecodeError:
-            parsed = None
+            try:
+                parsed = repair_json(block, return_objects=True)
+            except Exception:
+                parsed = None
         if isinstance(parsed, dict):
             parsed_objects.append(parsed)
     return parsed_objects
@@ -550,11 +578,29 @@ def _validate_response_mode(
 def build_openai_response(request: OpenAIRequest, full_content: str, response_tool_calls: List[Dict[str, Any]]) -> Dict[str, Any]:
     force_tool_json = should_force_tool_json(request)
     allowed_tool_names = get_allowed_tool_names(request)
+    parsed_payloads = try_parse_structured_payloads(full_content) if force_tool_json else []
     payload_tool_calls, selected_message_content = (
         _resolve_payload_result(full_content, allowed_tool_names) if force_tool_json else ([], None)
     )
     filtered_response_tool_calls = _filter_allowed_tool_calls(response_tool_calls, allowed_tool_names)
     all_tool_calls = filtered_response_tool_calls or payload_tool_calls
+    if force_tool_json:
+        log_debug_payload(
+            "structured_payload_resolution",
+            {
+                "parsed_payload_count": len(parsed_payloads),
+                "parsed_payload_types": [payload.get("type") for payload in parsed_payloads if isinstance(payload, dict)],
+                "payload_tool_call_names": [
+                    tool_call.get("function", {}).get("name") for tool_call in payload_tool_calls if isinstance(tool_call, dict)
+                ],
+                "event_tool_call_names": [
+                    tool_call.get("function", {}).get("name")
+                    for tool_call in filtered_response_tool_calls
+                    if isinstance(tool_call, dict)
+                ],
+                "selected_message_preview": (selected_message_content or "")[:200],
+            },
+        )
     response_message, finish_reason = _build_response_message(
         request, full_content, selected_message_content, all_tool_calls
     )
