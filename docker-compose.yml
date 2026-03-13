@@ -1,9 +1,9 @@
 services:
-  merlinai-proxy:
+  merlinai-adapter-server:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: merlinai-proxy
+    container_name: merlinai-adapter-server
     env_file:
       - .env
     ports:

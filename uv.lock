@@ -255,7 +255,7 @@ wheels = [
 ]
 
 [[package]]
-name = "merlinai-proxy"
+name = "merlinai-adapter-server"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -1,6 +1,6 @@
-# Merlin to OpenAI API Proxy
+# merlinai-adapter-server
 
-這個專案提供一個 FastAPI 代理伺服器，將 OpenAI 格式的請求轉換成 Merlin API 格式，並自動用 Firebase 帳密換取 Bearer token。
+這個專案提供一個 FastAPI adapter server，將 OpenAI 格式的請求轉換成 Merlin API 格式，並自動用 Firebase 帳密換取 Bearer token。
 
 ## 功能
 

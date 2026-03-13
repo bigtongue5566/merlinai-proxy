@@ -1,4 +1,4 @@
-from merlin_proxy import app
+from merlinai_adapter_server import app
 
 
 if __name__ == "__main__":

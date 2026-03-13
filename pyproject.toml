@@ -1,5 +1,5 @@
 [project]
-name = "merlinai-proxy"
+name = "merlinai-adapter-server"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

@@ -9,7 +9,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py README.md pyproject.toml ./
-COPY merlin_proxy ./merlin_proxy
+COPY merlinai_adapter_server ./merlinai_adapter_server
 
 EXPOSE 8000
 

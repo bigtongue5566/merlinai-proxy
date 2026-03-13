@@ -18,7 +18,7 @@ from .security import verify_proxy_api_key
 
 configure_logger()
 
-app = FastAPI(title="Merlin API Proxy")
+app = FastAPI(title="merlinai-adapter-server")
 
 
 def _build_merlin_payload_for_request(request: OpenAIRequest, prompt_mode: str = "default"):
