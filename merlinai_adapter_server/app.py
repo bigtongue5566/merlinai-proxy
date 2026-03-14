@@ -1,20 +1,16 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header
 from fastapi.responses import StreamingResponse
 
 from .logging_config import configure_logger, log_debug_payload
 from .merlin_client import build_merlin_payload, send_merlin_request
-from .openai_adapter import (
-    build_openai_response,
-    build_streamed_openai_response,
-    build_tool_prompt,
-    get_last_user_message,
-    should_force_tool_json,
-)
+from .message_utils import get_last_user_message
+from .openai_response_builder import build_openai_response, build_streamed_openai_response
 from .schemas import OpenAIRequest
 from .security import verify_proxy_api_key
+from .tool_prompt import build_tool_prompt, should_force_tool_json
 
 configure_logger()
 
